@@ -13,12 +13,10 @@ int initialized = -1;
 int sys_socket;
 pthread_t listen_th;
 pthread_mutex_t lock;
-pthread_cond_t condEtabConn = PTHREAD_COND_INITIALIZER;
-pthread_mutex_t mEtabConn = PTHREAD_MUTEX_INITIALIZER;
-unsigned short  loss_rate = 0;
+unsigned short loss_rate = 0;
 struct sockaddr_in remote_addr;
 
-extern int thread_listening; //Declaration. Definition in listening.
+extern int thread_listening; //Declaration. Definition in listening function.
 
 /* This is for the buffer */
 TAILQ_HEAD(tailhead, app_buffer_entry) app_buffer_head;
@@ -30,6 +28,31 @@ struct app_buffer_entry {
 
 /* Condition variable used for passive wait when buffer is empty */
 pthread_cond_t buffer_empty_cond;
+
+/*
+    WINDOW & TIMER variables
+*/
+
+
+extern int counter_window[WINDOW_SIZE]; // 0 = lost packet; 1 = well-sent packet (received by the server)
+
+
+int index_first_elmnt;
+mic_tcp_pdu * packet_window[WINDOW_SIZE];
+TIMER_MNGMNT_BOX timerBox;
+short int timer_state_window[WINDOW_SIZE];
+short int window_closed;
+
+mic_tcp_sock_addr socket_to_addr_dest[MAX_SOCKET];  //tableau où l'on stocke les addreses destinatrices des sockets
+
+
+short int timer_state_window[WINDOW_SIZE]; // 1 = timer is running; 0 = timer is done (timeout); -1 = timer is disabled;
+pthread_t timer_tid_window[WINDOW_SIZE]; // Up to match a state to thread
+
+short int timer_HS_state;
+pthread_t timer_HS_tid;
+
+
 
 /*************************
  * Fonctions Utilitaires *
@@ -92,9 +115,21 @@ int initialize_components(start_mode mode)
         if( mode == SERVER )
         {
             pthread_create (&listen_th, NULL, listening, "1");
+            for(int i=0; i<WINDOW_SIZE; i++)
+                packet_window[i] = NULL;
+
         }
-        else
+        else // CLIENT
         {
+            //Initialisation of variables
+            window_closed = 0;
+            index_first_elmnt = 0;
+            for(int i=0; i<WINDOW_SIZE; i++)
+            {
+                timer_state_window[i] = -1; // All timer are disabled
+                timer_HS_state = -1;
+                packet_window[i] = NULL;
+            }
             pthread_create (&listen_th, NULL, listening, "2");
         }
         
@@ -399,6 +434,95 @@ int min_size(int s1, int s2)
 {
     if(s1 <= s2) return s1;
     return s2;
+}
+
+
+/*
+    TIMER functions
+*/
+
+void* timer_HS_th(void* a)
+{
+    int ms = *(int*) a;
+    struct timespec set_time, left_time;
+    set_time.tv_sec = ms / 1000; /* seconds */
+    set_time.tv_nsec = (ms - set_time.tv_sec*1000) * 1000000; /* nanoseconds */
+    //printf("We have %ld secs and %ld msecs !\n", set_time.tv_sec, set_time.tv_nsec/1000000);
+	nanosleep( &set_time, &left_time );
+    timer_HS_state = 0;
+    free(a);
+    return NULL;
+
+}
+
+void* timer_th(void* arg)
+{
+    THRD_TIMER_ARG* tm_arg =(THRD_TIMER_ARG*)arg;
+    struct timespec set_time, left_time;
+    set_time.tv_sec = tm_arg->millisec / 1000; /* seconds */
+    set_time.tv_nsec = (tm_arg->millisec - set_time.tv_sec*1000) * 1000000; /* nanoseconds */
+    //printf("We have %ld secs and %ld msecs !\n", set_time.tv_sec, set_time.tv_nsec/1000000);
+	nanosleep( &set_time, &left_time );
+    
+    timer_state_window[tm_arg->index_timer] = 0; //We end the timer but not disable it
+    free(tm_arg);
+    return NULL;
+}
+
+void stop_timer(int index_timer){
+    timer_state_window[index_timer] = -1;
+    pthread_cancel(timer_tid_window[index_timer]);
+}
+
+void launch_timer(int index_timer, int millisec){
+    THRD_TIMER_ARG* tm_arg = malloc(sizeof(THRD_TIMER_ARG));
+	tm_arg->millisec = millisec;
+    tm_arg->index_timer = index_timer;
+    timer_state_window[index_timer] = 1;
+    if(pthread_create(timer_tid_window + index_timer, NULL, timer_th, tm_arg) == -1){
+        perror("Echec launch_timer ");
+    }
+    
+}
+
+void launch_HS_timer(int ms){
+    timer_HS_state = 1;
+    int* a_ms = malloc(sizeof(int));
+    *a_ms = ms;
+    if(pthread_create(&timer_HS_tid, NULL, timer_HS_th, a_ms) == -1){
+        perror("Echec launch_timer ");
+    }
+}
+
+void stop_HS_timer(int ms){
+    timer_HS_state = -1;
+    pthread_cancel(timer_HS_tid);
+}
+
+int check_HS_timer()
+{
+    return timer_HS_state;
+}
+
+
+int check_timer(int index_timer){
+    return timer_state_window[index_timer];
+}
+
+
+
+
+
+void* retransmission_th(void *arg){ // Thread in charge of the retransmission of packets on the sender side
+   int i=0;
+    while(1){
+        //while(none_timeout); // Wait until timeout occurs
+        if(check_timer(i) == 0){ // timeout
+            stop_timer(i);
+            IP_send(*packet_window[i], *timerBox.destination_addr);
+        }
+
+    }
 }
 
 

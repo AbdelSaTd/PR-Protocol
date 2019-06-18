@@ -43,4 +43,53 @@ void print_header(mic_tcp_pdu);
 int min_size(int, int);
 float mod(int, float);
 
+/* 
+  TIMER functions
+*/
+
+void stop_timer(int);
+void launch_timer(int, int);
+int check_timer(int);
+
+void launch_HS_timer(int);
+void stop_HS_timer();
+int check_HS_timer();
+
+/*
+  WINDOW functions
+*/
+
+void update_counter_window(int);
+
+/* 
+  WINDOW & TIMER variables
+*/
+
+// TIMER
+typedef struct {
+  short int** p_tmr_st_window;
+  mic_tcp_sock_addr* destination_addr;
+}TIMER_MNGMNT_BOX;
+
+typedef struct {
+  int millisec;
+  int index_timer;
+} THRD_TIMER_ARG;
+
+#define MAX_SOCKET 100
+#define WINDOW_SIZE 7 //SIZE OF WINDOW 
+
+extern int counter_window[WINDOW_SIZE]; // 0 = lost packet; 1 = well-sent packet (received by the server)
+extern int nb_sent_packet;
+
+extern int index_first_elmnt;
+extern mic_tcp_pdu * packet_window[WINDOW_SIZE];
+extern TIMER_MNGMNT_BOX timerBox;
+extern short int timer_state_window[WINDOW_SIZE];
+extern short int window_closed;
+
+extern mic_tcp_sock_addr socket_to_addr_dest[MAX_SOCKET];  //tableau où l'on stocke les addreses destinatrices des sockets
+
+
+
 #endif

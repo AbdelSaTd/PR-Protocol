@@ -1,11 +1,10 @@
 #include "../include/mictcp.h"
 #include "../include/api/mictcp_core.h"
-#include <api/thrd_timer.h>
 #include <string.h>
 #include <time.h>
 
-#define MAX_SOCKET 100
-#define TIMEOUT 100
+
+#define TIMEOUT 500 //millisec
 #define MAX_REENVOI 20
 
 
@@ -20,19 +19,28 @@ unsigned int PE=0,PA=0;
 
 
 
-#define TAILLE_FENETRE 20 //taille de la fenetre mémoire 
 #define PERTES_SIMULES 10//pertes simules par le gateway
 #define PERTES_AUTORISEES 15 //pertes autorisées par défaut par la source
 #define PERTES_POSSIBLE_RECV 15 // pertes autorisées par défaut par le puit
-
-int fenetre[TAILLE_FENETRE];  //fenetre mémoire de packet perdus non reenvoyes (1) et des packets bien reçus (0) 
+ 
 
 
 
 mic_tcp_sock mysockets[MAX_SOCKET];// tableau des sockets 
-mic_tcp_sock_addr socket_to_addr_dest[MAX_SOCKET];  //tableau où l'on stocke les addreses destinatrices des sockets
 int next_index_socket=0; //index du prochain socket utilisable
 int erreur_fixe = PERTES_AUTORISEES ; //pourcentage de pertes que l'on authorise 
+
+
+/*
+    WINDOW variables
+*/
+
+
+int seq_num_first_elmnt=0;
+// ew stands for emission_window
+pthread_cond_t ew_state_cond = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t ew_state_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 
 
 //variables globales utiles pour le bon fonctionnement des sous-fonctions 
@@ -41,13 +49,13 @@ int pointeur_fenetre = 0;
 int initialisee_fenetre=0;
 
 //Sous fonctions de gestion de la fenêtre glissante
-
+/*
 int count_ones()
 {   
     int rep=0; 
-    for(int i=0;i<pointeur_fenetre || (i<TAILLE_FENETRE && initialisee_fenetre) ;i++)
+    for(int i=0;i<pointeur_fenetre || (i<WINDOW_SIZE && initialisee_fenetre) ;i++)
     {
-        if (fenetre[i]==1)
+        if (counter_window[i]==1)
         {rep++; }
     }
     return rep;
@@ -84,15 +92,15 @@ void stateToString(protocol_state state, char* res, int sizemax){
 
 int pourcentage_erreur_fenetre()
 {
-   // if(pointeur_fenetre < TAILLE_FENETRE)
-    return initialisee_fenetre?(count_ones()*100/TAILLE_FENETRE):(count_ones()*100/(pointeur_fenetre+1)); 
+   // if(pointeur_fenetre < WINDOW_SIZE)
+    return initialisee_fenetre?(count_ones()*100/WINDOW_SIZE):(count_ones()*100/(pointeur_fenetre+1)); 
 }
 
 void add_fenetre(int value)
 {
-    if (pointeur_fenetre<TAILLE_FENETRE)
+    if (pointeur_fenetre<WINDOW_SIZE)
     {
-        fenetre[pointeur_fenetre]=value;
+        counter_window[pointeur_fenetre]=value;
     }
     else
     {
@@ -100,21 +108,31 @@ void add_fenetre(int value)
         initialisee_fenetre=1;
 
         pointeur_fenetre=0;
-        fenetre[pointeur_fenetre] = value;
+        counter_window[pointeur_fenetre] = value;
     } 
      pointeur_fenetre++;
 }
 void affiche_fenetre()
 {
-    for (int i=0;i<pointeur_fenetre|| (i<TAILLE_FENETRE && initialisee_fenetre) ;i++)
-    printf("%d ",fenetre[i]); 
+    for (int i=0;i<pointeur_fenetre|| (i<WINDOW_SIZE && initialisee_fenetre) ;i++)
+    printf("%d ",counter_window[i]); 
     printf("\n");
 
 
 }
+*/
 
 /*
-Cette fonction vérifie si le numéro de socket est dans les cas possibles
+    Function packets
+*/
+
+void free_packet(mic_tcp_pdu* p){
+    free(p->payload.data);
+    free(p);
+}
+
+/*
+Cette fonction vérifie si le numéro de socket est coherent
 */
 
 
@@ -215,7 +233,6 @@ int mic_tcp_accept(int socket, mic_tcp_sock_addr* addr)
     if(is_socket_used(socket))
     {
         while( mysockets[socket].state != ESTABLISHED );
-
         return 0;
     }
     else
@@ -264,6 +281,8 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
 
         //addr_dest est remplir
         addr_dest = socket_to_addr_dest[socket];
+        timerBox.destination_addr = &socket_to_addr_dest[socket];
+        
         
         //Construction of SYN
             //ACK header
@@ -287,12 +306,13 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
                 perror("Echec envoie du pdu SYN lors de l'etablissement de conn. ");
                 return -1;
             }
+            launch_HS_timer(TIMEOUT);
 
             printf("%d envoi de SYN pour etabliss; conn. ! \n ", MAX_REENVOI+1-nb_envoi_conn_max);
             mysockets[socket].state = WAIT_SYNACK_HANDSHAKE;
 
             //Attende de reception d'un SYN-ACK ou d'un TIMEOUT
-            while( !thrd_timer(TIMEOUT) || mysockets[socket].state != RECEPTION_SYNACK_HANDSHAKE);
+            while( check_HS_timer() || mysockets[socket].state != RECEPTION_SYNACK_HANDSHAKE);
 
 
             if(mysockets[socket].state != RECEPTION_SYNACK_HANDSHAKE)
@@ -304,7 +324,7 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
             else
             {
                 //SYNACK RECU
-
+                stop_HS_timer();
                 nb_envoi_conn_max = -1; // Pour sortir de la boucle
 
                 printf("SYN-ACK recu durant etabliss. conn. ! \n");
@@ -360,9 +380,8 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
 int mic_tcp_send (int mic_sock, char* mesg, int mesg_size)
 {
     printf("[MIC-TCP] Appel de la fonction: "); printf(__FUNCTION__); printf("\n");
-    mic_tcp_pdu p;
+    mic_tcp_pdu* p;
 	mic_tcp_sock_addr addr_dest;
-    int nb_reprise=MAX_REENVOI;
     int result;
 
     if(is_socket_used(mic_sock))
@@ -370,66 +389,100 @@ int mic_tcp_send (int mic_sock, char* mesg, int mesg_size)
         //Recuperer addresse du socket destinataire
         addr_dest = socket_to_addr_dest[mic_sock];
 
+
+        p = malloc(sizeof(mic_tcp_pdu));// For bufferisation
+
         //Payload
-        p.payload.data = malloc(mesg_size);
-        memcpy(p.payload.data, mesg, mesg_size);
-        p.payload.size = mesg_size;
+        p->payload.data = malloc(mesg_size); // For bufferisation
+        memcpy(p->payload.data, mesg, mesg_size);
+        p->payload.size = mesg_size;
 
         //Header
-        p.header.source_port = mysockets[mic_sock].addr.port;
-        p.header.dest_port = addr_dest.port;
-        p.header.seq_num = PE;
-        p.header.ack_num = -1;
-        p.header.syn = 0;
-        p.header.ack = 0;
-        p.header.fin = 0;
-        PE= 1 - PE;
-      
-        
-       while( nb_reprise>0 )
-       {
-            result=IP_send(p, addr_dest);
-            printf("Tentative numero %d \n ", MAX_REENVOI +1 - nb_reprise);
-            
-            //Attente de reception d'un ACK ou d'un TIMEOUT
-                // Gestion du numero de sequence dans process_received_pdu
-            while( !thrd_timer(TIMEOUT) || mysockets[mic_sock].state != RECEPTION_ACK_DATA);
-            
-            if( mysockets[mic_sock].state != RECEPTION_ACK_DATA )
-            {
-                //TIMEOUT
-                // On verifie si l'on peut tolerer cette eventuelle perte 
-                if(pourcentage_erreur_fenetre() < erreur_fixe  )
-                {
-                    //On accepte la perte
+        p->header.source_port = mysockets[mic_sock].addr.port;
+        p->header.dest_port = addr_dest.port;
+        p->header.seq_num = PE;
+        p->header.ack_num = -1;
+        p->header.syn = 0;
+        p->header.ack = 0;
+        p->header.fin = 0;
 
-                    printf("Perte acceptée \n");
-                    nb_reprise = -1; // On sort
-                    // On passe au packet suivant;
-                    PE = 1 - PE;   
-                    add_fenetre(1); 
-                }
-                else
-                {
-                    nb_reprise--;
-                    printf("Renvoi \n");
-                }
+
+        pthread_mutex_lock(&ew_state_mutex);
+
+        while ( window_closed ){
+            pthread_cond_wait(&ew_state_cond, &ew_state_mutex);
+        }
+
+        // Here, the window is open and we hold the mutex
+
+        int index_in_window = PE%WINDOW_SIZE;
+
+        //Send
+        result=IP_send(*p, addr_dest);
+
+        //Bufferisation
+        packet_window[index_in_window] = p;
+
+
+        //Launching of the timer
+        launch_timer(index_in_window, TIMEOUT);
+
+        //update_counter_window(index_in_window);
+
+        //PE=(PE+1)%WINDOW_SIZE;
+        PE++;
+
+        if( PE%WINDOW_SIZE == index_first_elmnt){ 
+            window_closed = 1;
+        }
+
+        pthread_mutex_unlock(&ew_state_mutex);
+
+      return result;
+    }
+    
+    printf("Bad socket descriptor [mictcp_send] \n");
+    return -1;
+
+        /*//Attente de reception d'un ACK ou d'un TIMEOUT
+            // Gestion du numero de sequence dans process_received_pdu
+        while( !thrd_timer(TIMEOUT) || mysockets[mic_sock].state != RECEPTION_ACK_DATA);
+        
+        if( mysockets[mic_sock].state != RECEPTION_ACK_DATA )
+        {
+            //TIMEOUT
+            // On verifie si l'on peut tolerer cette eventuelle perte 
+            if(pourcentage_erreur_fenetre() < erreur_fixe  )
+            {
+                //On accepte la perte
+
+                printf("Perte acceptée \n");
+                nb_reprise = -1; // On sort
+                // On passe au packet suivant;
+                PE = 1 - PE;   
+                add_fenetre(1); 
             }
             else
             {
-                //On a recu l'ACK
-                nb_reprise=-1;
-                printf("ACK recu ! \n ");
-                add_fenetre(0);
+                nb_reprise--;
+                printf("Renvoi \n");
             }
-       }    
+        }
+        else
+        {
+            //On a recu l'ACK
+            nb_reprise=-1;
+            printf("ACK recu ! \n ");
+            add_fenetre(0);
+        }
+          
        
         if(nb_reprise == 0) 
         {
             result = -1;
         }
         
-
+    
 
         affiche_fenetre(); 
        printf("Pourcentage de pertes actuelles (sur 20 derniers pacquets) =%d Pourcentage d'erreur authorisé = %d\n",pourcentage_erreur_fenetre(),erreur_fixe);
@@ -442,7 +495,7 @@ int mic_tcp_send (int mic_sock, char* mesg, int mesg_size)
         perror("Erreur mic_tcp_send() [Mauvais numero socket] ");
         return -1;
     }
-    
+    */
 
 }
 
@@ -459,7 +512,6 @@ int mic_tcp_recv (int socket, char* mesg, int max_mesg_size)
     int msg_size;
     if ( mysockets[socket].state==ESTABLISHED && is_socket_used(socket))
     {   
-
         p.payload.data=mesg;
         p.payload.size=max_mesg_size;
         msg_size=app_buffer_get(p.payload, 1);//Mode bloquant : la fonction bloque le thread jusqu'à ce qu'il ait au moins un pdu dans le buffer 
@@ -501,12 +553,15 @@ int mic_tcp_close (int socket)
                 perror("Erreur mic_tcp_close() ");
                 return -1;
             }
+            launch_HS_timer(TIMEOUT);
+
 
             // Attente reception de FINACK
-            while( !thrd_timer(TIMEOUT) || mysockets[socket].state != RECEPTION_FINACK_HANDSHAKE);
+            while( check_HS_timer() || mysockets[socket].state != RECEPTION_FINACK_HANDSHAKE);
 
             if( mysockets[socket].state == RECEPTION_FINACK_HANDSHAKE ) 
             {
+                stop_HS_timer();
                 printf("PDU FIN ACK recu ! \n");
                 nb_envoi_max = -1; // On sort de la boucle
             }
@@ -557,83 +612,138 @@ void process_received_PDU(mic_tcp_pdu pdu, mic_tcp_sock_addr addr )
     //SERVER
     if( service_mode == SERVER )
     {
-        if(mysocket_numb != -1 && is_socket_used(mysocket_numb)){
-
+        if(mysocket_numb != -1 && is_socket_used(mysocket_numb))
+        {
             protocol_state currentState = mysockets[mysocket_numb].state;
-            
-            if( currentState == ESTABLISHED &&pdu.header.fin==0)
-            {   
-                
-                ack.header.ack = 1;
-                ack.header.syn = 0;
-                ack.header.fin = 0;
 
-                ack.header.dest_port = addr.port;
-                //ack.header.dest_port = pdu.header.source_port;
+            if(currentState == ESTABLISHED)
+            {
+                if( pdu.payload.size > 0 )
+                {   
+                    int index_window = pdu.header.seq_num % WINDOW_SIZE;
+                    printf("[Client] PDU DATA recu numero de sequence %d ! \n ", pdu.header.seq_num);
 
-                //ack.header.source_port = mysockets[0].addr.port;
-                ack.header.source_port = pdu.header.dest_port;
-                ack.payload.size = 0;
-                ack.payload.data = NULL;
+                    if( pdu.header.seq_num == PA ) // The PDU we were waiting for...
+                    {
+                        // ACK    
+                        ack.header.ack = 1;
+                        ack.header.syn = 0;
+                        ack.header.fin = 0;
+                        ack.header.dest_port = addr.port;// <=> ack.header.dest_port = pdu.header.source_port;
+                        ack.header.source_port = pdu.header.dest_port;// <=> ack.header.source_port = mysockets[mysocket_numb].addr.port;
+                        ack.payload.size = 0;
+                        ack.payload.data = NULL;
 
-                if( pdu.header.seq_num == PA && pdu.payload.size > 0 )
-                {
-                    printf("PDU recu numero de sequence OK ! \n ");
-                    PA = (PA+1)%2;
-                    app_buffer_put(pdu.payload);
-                }
-                else
-                {
-                    printf("PDU recu seq num NON OK ! \n ");
-                }
+                        app_buffer_put(pdu.payload);
+                        PA++;
+                        index_first_elmnt = (index_first_elmnt+1)%WINDOW_SIZE;
 
-                ack.header.ack_num = PA;
-                printf("J'ai recu de { IP %s | Port %d | Taille %d } \n", addr.ip_addr, addr.port, addr.ip_addr_size);
-                    
-                if( IP_send(ack, addr) == -1 )
-                {
-                    perror("Erreur dans IP_send ");
-                    exit(-1);
-                }
+                        int shift=0;
+                        while(packet_window[index_first_elmnt] != NULL)
+                        {
+                            app_buffer_put(packet_window[index_first_elmnt]->payload);
+                            free_packet(packet_window[index_first_elmnt]);
+                            packet_window[index_first_elmnt] = NULL;
+                            shift++;
+                        }
+                        index_first_elmnt = (index_first_elmnt+shift)%WINDOW_SIZE;
+                        PA += shift;
+                        seq_num_first_elmnt += shift;
+                        ack.header.ack_num = PA;
 
-                if( pdu.header.seq_num == PA && pdu.payload.size > 0 )
-                {
-                    app_buffer_put(pdu.payload);
-                }
-
-            }
-            else if(currentState==ESTABLISHED &&  pdu.payload.size == 0 && pdu.header.fin == 1 )//PDU=FIN
-                    { 
-                        fin_ack.payload.data = NULL;
-                        fin_ack.payload.size = 0; 
-                        fin_ack.header.ack = 1;
-                        fin_ack.header.syn = 0;
-                        fin_ack.header.fin = 1;
-
-                        if( IP_send(fin_ack, addr) == -1 )
+                        if( IP_send(ack, addr) == -1 )
+                        {
+                            perror("Erreur dans IP_send ");
+                        }
+                           
+                    }
+                    else // Hoho something wrong probably happen...
+                    {
+                        if( pdu.header.seq_num >= seq_num_first_elmnt && pdu.header.seq_num < seq_num_first_elmnt + WINDOW_SIZE )
+                        {
+                            // PArtial Reliability need to be considere here
+                            if(packet_window[index_window] == NULL)
                             {
-                                perror("Erreur dans IP_send ");
-                                exit(-1);
+                                int size = sizeof(pdu);
+                                packet_window[index_window] = malloc(size);
+                                memcpy(packet_window[index_window], &pdu, size);
+                                packet_window[index_window]->payload.data = malloc(pdu.payload.size);
+                                memcpy(packet_window[index_window]->payload.data, pdu.payload.data, pdu.payload.size);
                             }
                             else
-                            {   
-                                printf("J'ai recu de { IP %s | Port %d | Taille %d } \n", addr.ip_addr, addr.port, addr.ip_addr_size);
-                                printf("PDU de fin  de connection reçu \n");
-                                free(mysockets[mysocket_numb].addr.ip_addr);
-                                free(socket_to_addr_dest[mysocket_numb].ip_addr);
-                                mysockets[mysocket_numb].state=CLOSED;
-                                exit(1);
+                            {
+                                // ACK    
+                                ack.header.ack = 1;
+                                ack.header.syn = 0;
+                                ack.header.fin = 0;
+                                ack.header.dest_port = addr.port;// <=> ack.header.dest_port = pdu.header.source_port;
+                                ack.header.source_port = pdu.header.dest_port;// <=> ack.header.source_port = mysockets[mysocket_numb].addr.port;
+                                ack.payload.size = 0;
+                                ack.payload.data = NULL;
+                            }
+                            
+
+                        }
+                        else
+                        {
+                            
+
+                            ack.header.ack_num = seq_num_first_elmnt;
+                            if( IP_send(ack, addr) == -1 )
+                            {
+                                perror("Erreur dans IP_send ");
+                            }
+                        }
+                        
+
+
 
                         
-                        }
-                            
                     }
 
                 
-            
+
+                    ack.header.ack_num = PA;
+                    printf("J'ai recu de { IP %s | Port %d | Taille %d } \n", addr.ip_addr, addr.port, addr.ip_addr_size);
+                        
+                    if( IP_send(ack, addr) == -1 )
+                    {
+                        perror("Erreur dans IP_send ");
+                        exit(-1);
+                    }
+
+                    if( pdu.header.seq_num == PA && pdu.payload.size > 0 )
+                    {
+                        app_buffer_put(pdu.payload);
+                    }
+
+                }
+                else if( pdu.header.fin == 1 )//PDU=FIN
+                { 
+                    fin_ack.payload.data = NULL;
+                    fin_ack.payload.size = 0; 
+                    fin_ack.header.ack = 1;
+                    fin_ack.header.syn = 0;
+                    fin_ack.header.fin = 1;
+
+                    if( IP_send(fin_ack, addr) == -1 )
+                    {
+                        perror("Erreur dans IP_send ");
+                        exit(-1);
+                    }  
+
+                    printf("J'ai recu de { IP %s | Port %d | Taille %d } \n", addr.ip_addr, addr.port, addr.ip_addr_size);
+                    printf("PDU de fin de connection reçu \n");
+                    free(mysockets[mysocket_numb].addr.ip_addr);
+                    free(socket_to_addr_dest[mysocket_numb].ip_addr);
+                    mysockets[mysocket_numb].state=CLOSED;
+                    
+                }
+                    
+            }  
             else if( currentState == IDLE || currentState == WAIT_ACK_HANDSHAKE )
             {
-            if( pdu.payload.size == 0 && pdu.header.fin == 0 )
+                if( pdu.payload.size == 0)
                 {
                     if( pdu.header.syn && pdu.header.ack == 0 )//pdu = SYN
                     {   
@@ -671,44 +781,59 @@ void process_received_PDU(mic_tcp_pdu pdu, mic_tcp_sock_addr addr )
                         
                     }
                     
+                }            
+                else
+                {
+                    printf("Erreur process_received_pdu : Mauvais etat \n");
                 }
+
+            }
                 
-
-
-            }
-        
-            else
-            {
-                printf("Erreur process_received_pdu : Mauvais etat \n");
-            }
             
-        
+        }else
+        {
+            perror("Error socket process_received_pdu ");
         }
+        
     }
     else
     {
         //CLIENT
+        
         //printf("Hello \n");
-        if( mysockets[mysocket_numb].state == WAIT_SYNACK_HANDSHAKE )
+        if( pdu.payload.size == 0)
         {
             //Verification pdu est bien un SYN-ACK
-            if( pdu.payload.size == 0 && pdu.header.syn && pdu.header.ack )
+            if( pdu.header.syn && pdu.header.ack )
             {    
                 printf("PDU SYNACK reçu \n");
                 //passer l'etat à RECEPTION_SYNACK_HANDSHAKE
                 mysockets[mysocket_numb].state = RECEPTION_SYNACK_HANDSHAKE;
             }
-                
-        }
-        else if (mysockets[mysocket_numb].state == WAIT_SYNACK_HANDSHAKE)
-        {
-            //Verification pdu est bien un SYN-ACK
-            if( pdu.payload.size == 0 && pdu.header.syn == 0 && pdu.header.ack )
+            //Verification pdu est bien un ACK
+            else if( pdu.header.ack )
             {   
-                if( pdu.header.ack_num == PE) 
+                //pthread_mutex_lock(&ew_state_mutex); // PE is seq numb of the next packet to send
+                // In the case when PE would be change after this test, we will not consider the new packet that has been added what is not dramatic since we will process it next time
+                if( pdu.header.ack_num > packet_window[index_first_elmnt]->header.seq_num && pdu.header.ack_num <= /*or < //!? */ PE) 
                 { 
-                   //passer l'etat à RECEPTION_SYNACK_HANDSHAKE
-                    mysockets[mysocket_numb].state = RECEPTION_ACK_DATA;
+                   int i=index_first_elmnt, ack_num_index = pdu.header.ack_num%WINDOW_SIZE;
+                   while(i != ack_num_index){
+                    //Disabling of timers
+                    stop_timer(i);
+                    //Freeing in the packet window
+                    free_packet(packet_window[i]);
+                    packet_window[i] = NULL;
+                    
+                    i = (i+1)%WINDOW_SIZE;
+                   }
+
+                   //Shifting of the packet window
+                   index_first_elmnt = ack_num_index; /* = pdu.header.ack_num%WINDOW_SIZE (but cost less since the variable <i> have always been passed throught the modulo) */
+                   
+                   //Notify that window is open
+                   window_closed = 0;
+                   pthread_cond_signal(&ew_state_cond);
                 }
                 else
                 {
@@ -717,11 +842,6 @@ void process_received_PDU(mic_tcp_pdu pdu, mic_tcp_sock_addr addr )
                 
             }
 
-        }
-        else if (pdu.payload.size == 0 && pdu.header.fin && pdu.header.ack)
-        {
-            
-            mysockets[mysocket_numb].state = RECEPTION_FINACK_HANDSHAKE;
         }
         
     }
