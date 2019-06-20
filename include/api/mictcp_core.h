@@ -43,11 +43,25 @@ void print_header(mic_tcp_pdu);
 int min_size(int, int);
 float mod(int, float);
 
+
+
+
+#define MAX_SOCKET 10
+#define WINDOW_SIZE 5 //SIZE OF WINDOW 
+
+
+extern pthread_cond_t connect_cond;
+extern pthread_mutex_t connect_mutex;
+
+extern int thread_listening; //Declaration. Definition in init function.
+extern mic_tcp_sock mysockets[MAX_SOCKET];
+
 /* 
   TIMER functions
 */
 
-void stop_timer(int);
+// Theses functions are thread safe
+int stop_timer(int);
 void launch_timer(int, int);
 int check_timer(int);
 
@@ -59,7 +73,7 @@ int check_HS_timer();
   WINDOW functions
 */
 
-void update_counter_window(int);
+void* retransmission_th(void*);
 
 /* 
   WINDOW & TIMER variables
@@ -76,8 +90,6 @@ typedef struct {
   int index_timer;
 } THRD_TIMER_ARG;
 
-#define MAX_SOCKET 100
-#define WINDOW_SIZE 7 //SIZE OF WINDOW 
 
 extern int counter_window[WINDOW_SIZE]; // 0 = lost packet; 1 = well-sent packet (received by the server)
 extern int nb_sent_packet;
@@ -89,6 +101,10 @@ extern short int timer_state_window[WINDOW_SIZE];
 extern short int window_closed;
 
 extern mic_tcp_sock_addr socket_to_addr_dest[MAX_SOCKET];  //tableau où l'on stocke les addreses destinatrices des sockets
+
+// ew stands for emission_window
+extern pthread_cond_t ew_state_cond;
+extern pthread_mutex_t ew_state_mutex;
 
 
 

@@ -16,7 +16,6 @@ pthread_mutex_t lock;
 unsigned short loss_rate = 0;
 struct sockaddr_in remote_addr;
 
-extern int thread_listening; //Declaration. Definition in listening function.
 
 /* This is for the buffer */
 TAILQ_HEAD(tailhead, app_buffer_entry) app_buffer_head;
@@ -28,14 +27,29 @@ struct app_buffer_entry {
 
 /* Condition variable used for passive wait when buffer is empty */
 pthread_cond_t buffer_empty_cond;
+pthread_cond_t connect_cond = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t connect_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t timeout_cond = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t timeout_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+
+
+
+
+pthread_t retransmission_tid;
+
 
 /*
     WINDOW & TIMER variables
 */
 
+pthread_cond_t ew_state_cond = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t ew_state_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-extern int counter_window[WINDOW_SIZE]; // 0 = lost packet; 1 = well-sent packet (received by the server)
-
+int timeout_th = 0;// Init to 0
+//extern int counter_window[WINDOW_SIZE]; // 0 = lost packet; 1 = well-sent packet (received by the server)
+int thread_listening;
+mic_tcp_sock mysockets[MAX_SOCKET];
 
 int index_first_elmnt;
 mic_tcp_pdu * packet_window[WINDOW_SIZE];
@@ -112,11 +126,13 @@ int initialize_components(start_mode mode)
 
     if(initialized == 1)
     {
+        thread_listening = 1;
         if( mode == SERVER )
         {
-            pthread_create (&listen_th, NULL, listening, "1");
             for(int i=0; i<WINDOW_SIZE; i++)
                 packet_window[i] = NULL;
+
+            pthread_create (&listen_th, NULL, listening, "1");
 
         }
         else // CLIENT
@@ -130,6 +146,7 @@ int initialize_components(start_mode mode)
                 timer_HS_state = -1;
                 packet_window[i] = NULL;
             }
+            pthread_create (&retransmission_tid, NULL, retransmission_th, NULL);
             pthread_create (&listen_th, NULL, listening, "2");
         }
         
@@ -137,7 +154,6 @@ int initialize_components(start_mode mode)
 
     return initialized;
 }
-
 
 
 int IP_send(mic_tcp_pdu pk, mic_tcp_sock_addr addr)
@@ -378,7 +394,7 @@ void* listening(void* arg)
     mic_tcp_pdu pdu_tmp;
     int recv_size;
     mic_tcp_sock_addr remote;
-    int thread_listening = 1;
+    thread_listening = 1;
 
     pthread_mutex_init(&lock, NULL);
 
@@ -402,7 +418,7 @@ void* listening(void* arg)
             printf("Error in recv\n");
         }
     }
-
+    printf("Listening thread ends ! \n");
     return NULL;
 }
 
@@ -450,6 +466,7 @@ void* timer_HS_th(void* a)
     //printf("We have %ld secs and %ld msecs !\n", set_time.tv_sec, set_time.tv_nsec/1000000);
 	nanosleep( &set_time, &left_time );
     timer_HS_state = 0;
+  //  pthread_cond_signal(&connect_cond);
     free(a);
     return NULL;
 
@@ -457,32 +474,47 @@ void* timer_HS_th(void* a)
 
 void* timer_th(void* arg)
 {
-    THRD_TIMER_ARG* tm_arg =(THRD_TIMER_ARG*)arg;
+    THRD_TIMER_ARG* tm_arg = (THRD_TIMER_ARG*)arg;
     struct timespec set_time, left_time;
     set_time.tv_sec = tm_arg->millisec / 1000; /* seconds */
     set_time.tv_nsec = (tm_arg->millisec - set_time.tv_sec*1000) * 1000000; /* nanoseconds */
     //printf("We have %ld secs and %ld msecs !\n", set_time.tv_sec, set_time.tv_nsec/1000000);
 	nanosleep( &set_time, &left_time );
-    
     timer_state_window[tm_arg->index_timer] = 0; //We end the timer but not disable it
+    
+    pthread_mutex_lock(&timeout_mutex);
+    timeout_th = 1;
+    pthread_mutex_unlock(&timeout_mutex);
+
+    pthread_cond_signal(&timeout_cond);
     free(tm_arg);
     return NULL;
 }
 
-void stop_timer(int index_timer){
+int stop_timer(int index_timer){
+    int r;
+    // We take the mutex, cancel the thread before to ensure it won't modify the flag after us here
+    pthread_mutex_lock(&timeout_mutex);
+    r = pthread_cancel(timer_tid_window[index_timer]);
     timer_state_window[index_timer] = -1;
-    pthread_cancel(timer_tid_window[index_timer]);
+    pthread_mutex_unlock(&timeout_mutex);
+
+    return r;
 }
 
 void launch_timer(int index_timer, int millisec){
     THRD_TIMER_ARG* tm_arg = malloc(sizeof(THRD_TIMER_ARG));
 	tm_arg->millisec = millisec;
     tm_arg->index_timer = index_timer;
-    timer_state_window[index_timer] = 1;
+
+    // We launch the timer before starting update the flag
     if(pthread_create(timer_tid_window + index_timer, NULL, timer_th, tm_arg) == -1){
-        perror("Echec launch_timer ");
+        perror("Error launch_timer ");
     }
-    
+
+    pthread_mutex_lock(&timeout_mutex);
+    timer_state_window[index_timer] = 1;
+    pthread_mutex_unlock(&timeout_mutex);
 }
 
 void launch_HS_timer(int ms){
@@ -506,7 +538,12 @@ int check_HS_timer()
 
 
 int check_timer(int index_timer){
-    return timer_state_window[index_timer];
+    int r;
+    pthread_mutex_lock(&timeout_mutex);
+    r = timer_state_window[index_timer];
+    pthread_mutex_unlock(&timeout_mutex);
+
+    return r;
 }
 
 
@@ -514,14 +551,29 @@ int check_timer(int index_timer){
 
 
 void* retransmission_th(void *arg){ // Thread in charge of the retransmission of packets on the sender side
-   int i=0;
     while(1){
         //while(none_timeout); // Wait until timeout occurs
-        if(check_timer(i) == 0){ // timeout
-            stop_timer(i);
-            IP_send(*packet_window[i], *timerBox.destination_addr);
+        
+        pthread_mutex_lock(&timeout_mutex);
+        while( !timeout_th )
+        {
+            pthread_cond_wait(&timeout_cond, &timeout_mutex);
         }
+        timeout_th = 0;
+        pthread_mutex_unlock(&timeout_mutex); // We release the mutex because (check&stop)_timer are thread_safe function
 
+
+        
+        for(int i=0; i<WINDOW_SIZE; i++)
+        {
+            if(check_timer(i) == 0){ // timeout
+                stop_timer(i);
+                pthread_mutex_lock(&ew_state_mutex);
+                IP_send(*packet_window[i], *timerBox.destination_addr);
+                printf(" [Retrans THREAD] Retransmission happen: index <%d> seq_num <%d>  \n", i, packet_window[i]->header.seq_num);
+                pthread_mutex_unlock(&ew_state_mutex);
+            }
+        }
     }
 }
 

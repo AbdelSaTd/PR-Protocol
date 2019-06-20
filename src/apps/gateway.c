@@ -223,6 +223,7 @@ static void file_to_mictcp(char* filename)
     dest_addr.port = MICTCP_PORT;
     if (mic_tcp_connect(sockfd, dest_addr) == -1) {
         printf("ERROR connecting the MICTCP socket\n");
+        exit(-1);
     }
 
     /* Ouverture du fichier vidéo */

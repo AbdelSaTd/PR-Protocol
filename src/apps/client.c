@@ -8,10 +8,12 @@ int main()
 {
 
     int sockfd = 0;
-    char chaine[MAX_SIZE];
+    int NB_MAX_PDU = 100;
+    char str[MAX_SIZE];
     mic_tcp_sock_addr addr;
     addr.ip_addr = "127.0.0.1";
     addr.port = 1234;
+    addr.ip_addr_size = strlen(addr.ip_addr)+1;
     
 
     if ((sockfd = mic_tcp_socket(CLIENT)) == -1)
@@ -34,12 +36,14 @@ int main()
         printf("[TSOCK] Connexion du socket MICTCP: OK\n");
     }
 
-    memset(chaine, 0, MAX_SIZE);
+    memset(str, 0, MAX_SIZE);
 
     printf("[TSOCK] Entrez vos message a envoyer, CTRL+D pour quitter\n");
-    while(fgets(chaine, MAX_SIZE , stdin) != NULL) {
-        int sent_size = mic_tcp_send(sockfd, chaine, strlen(chaine)+1);
-        printf("[TSOCK] Appel de mic_send avec un message de taille : %lu\n", strlen(chaine)+1);
+    for(int i=0; i<NB_MAX_PDU; i++)
+    {
+        snprintf(str, MAX_SIZE, "%d", i);
+        int sent_size = mic_tcp_send(sockfd, str, strlen(str)+1);
+        printf("[TSOCK] Appel de mic_send message { %s } : taille %lu\n", str, strlen(str)+1);
         printf("[TSOCK] Appel de mic_send valeur de retour : %d\n", sent_size);
     }
 
