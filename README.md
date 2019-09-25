@@ -1,2 +1,2 @@
-# PR-TCP
-An implementation of TCP adapted for real-time application, partial reliability. Example with a video transfer.
+# PR-Protocol
+An implementation of a partial reliable protocol adapted for videoconference-like applications. Use case of a video transfer between two end poins.
