@@ -3,7 +3,6 @@
 #include <string.h>
 #include <time.h>
 
-
 #define TIMEOUT 10000 //millisec
 #define MAX_CONN_SENDING 10
 
@@ -13,158 +12,25 @@ mic_tcp_sock_addr socket_to_addr_dest[MAX_SOCKET];
 int last_index_socket=0;
 int service_mode;
 
-
-
 unsigned int PE=0,PA=0;
-
-
 
 #define SIMULATED_LOSS 10//Loss effectively simulated by the gateway
 #define MAX_AUTH_LOSS 15 //Maximal loss authorised by PRTCP
-
-
-
 
 mic_tcp_sock mysockets[MAX_SOCKET];// tableau des sockets
 int next_index_socket=0; //index du prochain socket utilisable
 int erreur_fixe = MAX_AUTH_LOSS ; //pourcentage de pertes que l'on authorise
 
-
 /*
     WINDOW variables
 */
 
-
 int seq_num_first_elmnt=0;
-
-
-
 
 //variables globales utiles pour le bon fonctionnement des sous-fonctions
 //qui traitent la fenetre
 int pointeur_fenetre = 0;
 int initialisee_fenetre=0;
-
-
-void printfState(protocol_state state){
-    switch(state){
-        case IDLE:
-        printf(" IDLE ");
-        break;
-
-        case CLOSED:
-        printf(" CLOSED ");
-        break;
-
-        case WAIT_ACK_HANDSHAKE:
-        printf(" WAIT_ACK_HANDSHAKE ");
-        break;
-
-        case WAIT_SYNACK_HANDSHAKE:
-        printf(" WAIT_SYNACK_HANDSHAKE ");
-        break;
-
-        case ESTABLISHED:
-        printf(" ESTABLISHED ");
-        break;
-
-        case CLOSING:
-        printf(" CLOSING ");
-        break;
-
-        case RECEPTION_ACK_DATA:
-        printf(" RECEPTION_ACK_DATA ");
-        break;
-
-        case RECEPTION_SYNACK_HANDSHAKE:
-        printf(" RECEPTION_SYNACK_HANDSHAKE ");
-        break;
-
-        case RECEPTION_FINACK_HANDSHAKE:
-        printf(" RECEPTION_FINACK_HANDSHAKE ");
-        break;
-
-        default:
-        printf("No state corresponding : Unknow state ");
-        break;
-    }
-
-}
-
-
-//Sous fonctions de gestion de la fenêtre glissante
-/*
-int count_ones()
-{
-    int rep=0;
-    for(int i=0;i<pointeur_fenetre || (i<WINDOW_SIZE && initialisee_fenetre) ;i++)
-    {
-        if (counter_window[i]==1)
-        {rep++; }
-    }
-    return rep;
-}
-
-void stateToString(protocol_state state, char* res, int sizemax){
-    if(res != NULL){
-        switch(state){
-            case IDLE:
-            strncpy(res, "IDLE", sizemax);
-            break;
-
-            case CLOSED:
-            strncpy(res, "CLOSED", sizemax);
-            break;
-
-            case WAIT_ACK_HANDSHAKE:
-            strncpy(res, "WAIT_ACK_HANDSHAKE", sizemax);
-            break;
-
-            case WAIT_SYNACK_HANDSHAKE:
-            strncpy(res, "WAIT_SYNACK_HANDSHAKE", sizemax);
-            break;
-
-            default:
-            perror("No state corresponding : Unknow state ");
-            exit(-1);
-            break;
-
-        }
-    }
-
-}
-
-int pourcentage_erreur_fenetre()
-{
-   // if(pointeur_fenetre < WINDOW_SIZE)
-    return initialisee_fenetre?(count_ones()*100/WINDOW_SIZE):(count_ones()*100/(pointeur_fenetre+1));
-}
-
-void add_fenetre(int value)
-{
-    if (pointeur_fenetre<WINDOW_SIZE)
-    {
-        counter_window[pointeur_fenetre]=value;
-    }
-    else
-    {
-        if(!initialisee_fenetre)
-        initialisee_fenetre=1;
-
-        pointeur_fenetre=0;
-        counter_window[pointeur_fenetre] = value;
-    }
-     pointeur_fenetre++;
-}
-void affiche_fenetre()
-{
-    for (int i=0;i<pointeur_fenetre|| (i<WINDOW_SIZE && initialisee_fenetre) ;i++)
-    printf("%d ",counter_window[i]);
-    printf("\n");
-
-
-}
-*/
 
 /*
     Function packets
@@ -222,8 +88,6 @@ int port_to_socket( int port )
 	return -1;
 }
 
-
-
 /*
  * Permet de créer un socket entre l’application et MIC-TCP
  * Retourne le descripteur du socket ou bien -1 en cas d'erreur
@@ -256,7 +120,6 @@ int mic_tcp_socket(start_mode sm)
  * Permet d’attribuer une adresse à un socket.
  * Retourne 0 si succès, et -1 en cas d’échec
  */
-
 int mic_tcp_bind(int socket, mic_tcp_sock_addr addr)
 {
    printf("[MIC-TCP] Appel de la fonction: ");  printf(__FUNCTION__); printf("\n");
@@ -362,7 +225,7 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
 
         while( nb_envoi_conn_max > 0 )
         {
-/* ****** */pthread_mutex_lock(&connect_mutex);
+/* ** CS ** */pthread_mutex_lock(&connect_mutex);
 
             //Envoie de SYN
             result=IP_send(pdu_etab_conn, addr_dest);
@@ -376,8 +239,8 @@ int mic_tcp_connect(int socket, mic_tcp_sock_addr addr)
 
             mysockets[socket].state = WAIT_SYNACK_HANDSHAKE; 
 
-/* ****** */pthread_mutex_unlock(&connect_mutex);
-            // This is a CS because this sequence leads to an infinite loop :
+/* ** CS ** */pthread_mutex_unlock(&connect_mutex);
+            // This is a critical section (CS) because this sequence leads to an infinite loop :
             // Either th1 (this thread) and th2 those of process_received_pdu
             // 
             // th1 --> IP_send(...); printf(...); ... ; launch_HS_timer(...);
@@ -740,7 +603,7 @@ void process_received_PDU(mic_tcp_pdu pdu, mic_tcp_sock_addr addr )
                     else // Hoho something wrong probably happen...
                     {
                         
-                        printf("Hoho smthg went wrong \n");
+                        printf("Hoho smthg went wrong [ packet lost ] \n");
 
                         if( pdu.header.seq_num >= seq_num_first_elmnt && pdu.header.seq_num < seq_num_first_elmnt + WINDOW_SIZE )
                         {
@@ -803,7 +666,6 @@ void process_received_PDU(mic_tcp_pdu pdu, mic_tcp_sock_addr addr )
                     pthread_mutex_lock(&connect_mutex);
                     mysockets[mysocket_numb].state=CLOSING;
                     pthread_mutex_unlock(&connect_mutex);
-
 
                 }
 
@@ -922,7 +784,7 @@ void process_received_PDU(mic_tcp_pdu pdu, mic_tcp_sock_addr addr )
                 else
                 {
                     //pthread_mutex_lock(&ew_state_mutex); // PE is seq numb of the next packet to send
-                    // In the case when PE would be change after this test, we will not consider the new packet that has been added what is not dramatic since we will process it next time
+                    // In the case where PE would be changed after this test, we will not consider the new packet that has been added what is not dramatic since we will process it next time
                     printf("ACK recu [BEFORE] \n");
 
                     pthread_mutex_lock(&ew_state_mutex);

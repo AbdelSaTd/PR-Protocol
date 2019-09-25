@@ -140,10 +140,10 @@ int initialize_components(start_mode mode)
             //Initialisation of variables
             window_closed = 0;
             index_first_elmnt = 0;
+            timer_HS_state = -1;
             for(int i=0; i<WINDOW_SIZE; i++)
             {
                 timer_state_window[i] = -1; // All timer are disabled
-                timer_HS_state = -1;
                 packet_window[i] = NULL;
             }
             pthread_create (&retransmission_tid, NULL, retransmission_th, NULL);
